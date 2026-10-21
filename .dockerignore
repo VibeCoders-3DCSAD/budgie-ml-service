@@ -1,0 +1,7 @@
+*
+!app/
+!app/**
+!models/
+!models/**
+!requirements.txt
+app/**/__pycache__/

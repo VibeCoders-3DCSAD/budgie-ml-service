@@ -1,0 +1,49 @@
+{
+  "method": "highs",
+  "artifact": "models/budget/budget_config.json",
+  "description": "Deterministic two-stage LP formulation snapshot (Financial Planning Management V4). The optimizer code lives in app/services/budget_service.py; this config pins the solver and the constraint/monitoring contract.",
+  "solver": "scipy.optimize.linprog",
+  "decision_variables": [
+    "allocation x_i >= 0 (continuous, unrounded)",
+    "stage-1 Essential coverage level r >= 0"
+  ],
+  "bounds": {
+    "FIXED": "l_i = U_i = floor",
+    "MINIMUM": "l_i = floor, U_i = max(floor, min(ceiling, target))",
+    "FLEXIBLE": "l_i = floor, U_i = max(floor, min(ceiling, target))",
+    "target": "forecast amount, else available_funds * target_ratio (missing = 0)"
+  },
+  "stages": [
+    {
+      "name": "essential_coverage",
+      "objective": "maximize r",
+      "constraints": [
+        "x_i >= l_i + r * w_i * (U_i - l_i) for each Essential with U_i > l_i",
+        "l_i <= x_i <= U_i",
+        "sum(x) <= available_funds"
+      ],
+      "output": "stage-1 x_i becomes the floor for each Essential"
+    },
+    {
+      "name": "essential_first_allocation",
+      "objective": "maximize sum((w_i + P * I_essential_i) * x_i)",
+      "priority_coefficient": "P = sum(w_i * U_i) + 1",
+      "constraints": [
+        "stage-1 floor <= x_i <= U_i (Essential)",
+        "l_i <= x_i <= U_i (Non-essential)",
+        "sum(x) <= available_funds"
+      ]
+    }
+  ],
+  "weights": "w_i = max(priority_weight, eps)",
+  "rounding": "none",
+  "surplus": "available_funds - sum(x) is returned as unallocated_surplus",
+  "infeasible_when": "sum(l_i) > available_funds",
+  "eps": 1e-09,
+  "feasibility_states": [
+    "FEASIBLE",
+    "INFEASIBLE"
+  ],
+  "source_data": "training/synth/personas.parquet",
+  "evaluation": "models/budget/evaluation.json"
+}

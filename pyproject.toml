@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "budgie-ml-service"
+version = "0.1.0"
+description = "Inference-only financial classification, SARIMA forecasting, and budget recommendations."
+requires-python = ">=3.14,<3.15"
+dependencies = [
+  "fastapi==0.135.3",
+  "uvicorn==0.53.0",
+  "pydantic==2.13.5",
+  "statsmodels==0.15.0",
+  "numpy==2.5.3",
+  "scipy==1.18.1",
+  "pandas==3.0.6",
+  "joblib==1.6.0",
+  "anyio==4.15.1",
+  "pyarrow==25.0.1",
+]
+
+[dependency-groups]
+dev = ["pytest==9.1.1", "httpx==0.28.1", "ruff==0.16.8", "mypy==2.3.1"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/api/*.py" = ["B008"]
+
+[tool.mypy]
+python_version = "3.14"
+check_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

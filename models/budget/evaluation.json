@@ -1,0 +1,17 @@
+{
+  "generated_at": "2026-09-08T03:54:48.191820Z",
+  "task": "budget_optimization",
+  "task_type": "deterministic_lp",
+  "n_folds": 1,
+  "n_users": 600,
+  "winner": "scipy_linprog",
+  "winner_artifact": "budget_config.json",
+  "winner_reason": "scipy.linprog (exact, fast) selected as current v1 per model candidate roster",
+  "decision_rule_text": "LP must satisfy all hard constraints with high utilization and minimal deviation from user preferences",
+  "constraint_satisfaction_rate": 1.0,
+  "budget_utilization_rate": 1.0,
+  "mean_deviation": 0.041041456301311854,
+  "feasibility": "541/600 FEASIBLE, 59/600 INFEASIBLE",
+  "feature_columns": [],
+  "metrics": null
+}

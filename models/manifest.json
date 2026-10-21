@@ -1,0 +1,23 @@
+{
+  "source_repository": "https://github.com/VibeCoders-3DCSAD/Odin-ml",
+  "source_commit": "1685d2ec1006e5a9c6421cd4bc2718d57d41c6c5",
+  "sha256": {
+    "budget/budget_config.json": "7fbcf4f24cba7088a30bb80a16f90a0a768dbee3166f6014f12bd0772095c757",
+    "budget/evaluation.json": "43a68caf8878be9d1f8138a78bec104997370c03591d2e86dccb83b5f25f3890",
+    "budget/metadata.json": "2a85239091bc6caf57e26c58ca327e8a14c2a587dce4333db79e8949c5e343c4",
+    "hfce_sarima_v4/alcohol_tobacco.joblib": "103481093b048e3783e203973ea32bf1a2fd2699bf941dc06f1948864678712f",
+    "hfce_sarima_v4/clothing_footwear.joblib": "7a6d945278efd4a1bae0d89c281785e4f197f51fe4157a4710eb8f358a44a3c2",
+    "hfce_sarima_v4/communication.joblib": "99efba6a592aaee3ca7159ba53e4001fc4a3c4f40d4195e3feba9667eb93c8d8",
+    "hfce_sarima_v4/education.joblib": "f6ae749a9df4c7b5190e3da4d4adb955faf0fa2c31051f69be88434cabb84870",
+    "hfce_sarima_v4/evaluation.json": "a6be287a58283f007184acc6d2b93a35a3acd6e94fca2663f051e96ebf181d8b",
+    "hfce_sarima_v4/food.joblib": "f14c6106f11011b932aab3776273bcf0965cd696b0386d32e9b723606b627154",
+    "hfce_sarima_v4/furnishings_household.joblib": "ecd9d94e9e00a68b4a31f76daa313e59e1493c8b4eb06d709b62f79aa0dd1d2c",
+    "hfce_sarima_v4/health.joblib": "5473f5649168ef91302705099c9daa659214d0e2c73581e5d1ef2d574314167c",
+    "hfce_sarima_v4/housing_water_utilities.joblib": "ca5b1b29eef6381019b05a73cab4c0bd9b3de3ece40f6c10963770c01191bf7b",
+    "hfce_sarima_v4/metadata.json": "6343dc6f0e9faefb7369105301f5921f388e72e30009b305a815f9e3397788f3",
+    "hfce_sarima_v4/miscellaneous_goods_services.joblib": "7934203ab48094fcdbe42725218c0063e25f93076745aa858128f61d3b11f8df",
+    "hfce_sarima_v4/recreation_culture.joblib": "9898a947a398c56dab5f9afb147e861ddede393cabcdd2e863e326cd8eca6de4",
+    "hfce_sarima_v4/restaurants_hotels.joblib": "600de4cdce4c2ae093d90f28d970afa7b709391252318dac9f69838aabd3b445",
+    "hfce_sarima_v4/transport.joblib": "8ed62f432b6134bda0dbedebde2b1c42a06e76eaf77a91a909048c247d31a5c0"
+  }
+}

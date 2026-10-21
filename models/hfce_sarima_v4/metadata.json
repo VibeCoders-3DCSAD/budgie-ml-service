@@ -1,0 +1,56 @@
+{
+  "model_id": "hfce-sarima-v4",
+  "family": "hfce_sarima_v4",
+  "created_at": "2026-10-15T06:31:56Z",
+  "training_commit": "b5b780f-dirty",
+  "training_data_hash": "ed99dc7d9fe7da2efe89eb79aa69a1f03b6eaf587a1b1825f3238a6e2570a6aa",
+  "psa_data_vintage": "2026-08-07",
+  "framework": "statsmodels",
+  "framework_version": "0.15.0",
+  "python_version": "3.14.4",
+  "artifacts": [
+    "alcohol_tobacco.joblib",
+    "clothing_footwear.joblib",
+    "communication.joblib",
+    "education.joblib",
+    "food.joblib",
+    "furnishings_household.joblib",
+    "health.joblib",
+    "housing_water_utilities.joblib",
+    "miscellaneous_goods_services.joblib",
+    "recreation_culture.joblib",
+    "restaurants_hotels.joblib",
+    "transport.joblib"
+  ],
+  "feature_columns": [],
+  "metrics": {
+    "primary": {
+      "name": "macro_test_smape_percent",
+      "value": 3.075177930170995
+    },
+    "secondary": {
+      "macro_test_mda_percent": 97.5
+    }
+  },
+  "decision_rule": "lowest expanding-window rolling-origin four-quarter validation MAE among SARIMA candidates; ties resolve by SMAPE, RMSE, then MDA; the next-ranked SARIMA is released only if the leader fails to fit on test or full-data refits",
+  "winner": "category_specific_sarima",
+  "winner_artifact": null,
+  "winner_reason": "each of 12 HFCE categories releases its own s=4 SARIMA order and target transform from the bounded grid",
+  "winner_params": {
+    "alcohol_tobacco": "sarima_100_200_log1p",
+    "clothing_footwear": "sarima_001_112_identity",
+    "communication": "sarima_001_100_identity",
+    "education": "sarima_013_101_log1p",
+    "food": "sarima_201_102_identity",
+    "furnishings_household": "sarima_100_100_log1p",
+    "health": "sarima_001_101_identity",
+    "housing_water_utilities": "sarima_301_102_identity",
+    "miscellaneous_goods_services": "sarima_300_202_identity",
+    "recreation_culture": "sarima_003_010_log1p",
+    "restaurants_hotels": "sarima_010_102_log1p",
+    "transport": "sarima_003_010_log1p"
+  },
+  "threshold": null,
+  "fitted": true,
+  "serving_note": "Used only to provide national category trend multipliers for quarterly personal spending projections; it does not model individual behavior."
+}

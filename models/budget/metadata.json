@@ -1,0 +1,33 @@
+{
+  "model_id": "budget-scipy_linprog",
+  "family": "budget",
+  "created_at": "2026-09-08T03:54:48.410537Z",
+  "training_commit": "9aa973a",
+  "training_data_hash": "f35705f79073226cd1aa4394b3fe619fb546b75f64bcbe29e84dc8f9d88f0294",
+  "framework": "scipy",
+  "framework_version": "1.18.0",
+  "python_version": "3.14.4",
+  "artifacts": [
+    "budget_config.json"
+  ],
+  "feature_columns": [],
+  "metrics": {
+    "primary": {
+      "name": "constraint_satisfaction_rate",
+      "value": 1.0,
+      "folds": null
+    },
+    "secondary": {
+      "budget_utilization_rate": 1.0,
+      "mean_deviation": 0.041041456301311854
+    }
+  },
+  "decision_rule": "LP must satisfy all hard constraints with high utilization and minimal deviation from user preferences",
+  "winner": "scipy_linprog",
+  "winner_artifact": "budget_config.json",
+  "winner_reason": "scipy.linprog (exact, fast) selected as current v1 per model candidate roster",
+  "winner_params": null,
+  "threshold": null,
+  "fitted": false,
+  "serving_note": "loaded by app/models/loader.py"
+}

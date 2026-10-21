@@ -1,0 +1,148 @@
+from __future__ import annotations
+
+import logging
+from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
+
+import numpy as np
+import pandas as pd
+
+from app.core.config import MAX_FORECAST_MONTHS
+from app.models.registry import ModuleModel
+from app.schemas.forecast import ForecastPoint
+from app.services.features import transactions_to_frame
+
+logger = logging.getLogger(__name__)
+
+# Completed months that feed the baseline, ending with last month.
+BASELINE_LOOKBACK_MONTHS = 12
+# A category whose latest completed-month spend is this many months old is stale.
+STALE_CATEGORY_MONTHS = 6
+
+
+def _round_to_whole_peso(amount: float) -> float:
+    return float(Decimal(str(amount)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _inverse_hfce_values(values: np.ndarray, transform: str) -> np.ndarray:
+    if transform == "identity":
+        return np.asarray(values, dtype="float64")
+    if transform == "log1p":
+        return np.expm1(values)
+    if transform == "log":
+        return np.exp(values)
+    raise ValueError(f"unknown HFCE target transform: {transform}")
+
+
+def _hfce_quarterly_series(artifact: dict, forecast_steps: int) -> pd.Series:
+    """Observed plus forecast HFCE values, indexed by quarter, for either artifact family."""
+    if artifact.get("family", "sarima") != "seasonal_naive":
+        transform = artifact["transform"]
+        history = _inverse_hfce_values(
+            np.asarray(artifact["model"].model.endog, dtype="float64").reshape(-1), transform
+        )
+        forecast = _inverse_hfce_values(
+            np.asarray(artifact["model"].forecast(forecast_steps)), transform
+        )
+        values = [*history.tolist(), *np.asarray(forecast, dtype="float64").reshape(-1).tolist()]
+    else:
+        values = np.asarray(artifact["model"], dtype="float64").tolist()
+        for _ in range(forecast_steps):
+            values.append(values[-4])
+    last_quarter = pd.Period(artifact["period_end"], freq="Q") + forecast_steps
+    quarters = pd.period_range(end=last_quarter, periods=len(values), freq="Q")
+    return pd.Series(values, index=quarters, dtype="float64")
+
+
+def _monthly_baseline(
+    expenses: pd.DataFrame, category: str, as_of: date
+) -> tuple[float, np.ndarray, list[str]]:
+    current_month = pd.Period(as_of, freq="M")
+    expense_months = expenses["date"].dt.to_period("M")
+    completed = expenses.loc[
+        expense_months.lt(current_month)
+        & expense_months.ge(current_month - BASELINE_LOOKBACK_MONTHS)
+        & expenses["category"].eq(category)
+    ]
+    monthly = completed.groupby(completed["date"].dt.to_period("M"))["amount"].sum()
+    if monthly.empty:
+        raise ValueError(f"forecast requires a completed {category} month")
+    if monthly.index.max() <= current_month - STALE_CATEGORY_MONTHS:
+        raise ValueError(f"forecast has no recent {category} spending")
+    values = monthly.to_numpy(dtype="float64")
+    weights = np.arange(1, len(values) + 1, dtype="float64")
+    return (
+        float(np.average(values, weights=weights)),
+        values,
+        [str(month) for month in monthly.index],
+    )
+
+
+def forecast(
+    model: ModuleModel,
+    transactions: list[dict],
+    categories: list[str],
+    as_of: date | None = None,
+    user_id: str | None = None,
+    target_month: str | None = None,
+) -> list[ForecastPoint]:
+    """Project each HFCE category for one month: the next calendar month unless one is given."""
+    as_of = as_of or date.today()
+    current_month = pd.Period(as_of, freq="M")
+    target_period = pd.Period(target_month, freq="M") if target_month else current_month + 1
+    if target_period < current_month:
+        raise ValueError("forecast target month cannot be in the past")
+    if target_period > current_month + MAX_FORECAST_MONTHS:
+        raise ValueError("forecast target month exceeds the 12-month serving horizon")
+    frame = transactions_to_frame(transactions)
+    expenses = frame.loc[
+        frame["transaction_type"].eq("expense") & frame["date"].dt.date.le(as_of)
+    ].copy()
+    if expenses.empty:
+        raise ValueError("forecast requires at least one expense transaction")
+
+    target_quarter = target_period.asfreq("Q")
+    points = []
+    for category in dict.fromkeys(categories):
+        artifact = model.model.get(category)
+        if artifact is None:
+            raise ValueError(f"forecast does not support category: {category}")
+        user_baseline, monthly_history, baseline_months = _monthly_baseline(
+            expenses, category, as_of
+        )
+        baseline_weights = np.arange(1, len(monthly_history) + 1, dtype="float64")
+
+        artifact_quarter = pd.Period(artifact["period_end"], freq="Q")
+        forecast_steps = target_quarter.ordinal - artifact_quarter.ordinal
+        if forecast_steps < 1:
+            raise ValueError("forecast data is unavailable for the target month")
+        national = _hfce_quarterly_series(artifact, forecast_steps)
+        national_forecast = float(national[target_quarter])
+        # Compare against national HFCE for the same quarters the user's baseline came from.
+        baseline_quarters = [pd.Period(month, freq="M").asfreq("Q") for month in baseline_months]
+        if any(quarter not in national.index for quarter in baseline_quarters):
+            raise ValueError("forecast data is unavailable for the baseline months")
+        national_baseline = float(
+            np.average(national[baseline_quarters].to_numpy(), weights=baseline_weights)
+        )
+        multiplier = national_forecast / national_baseline
+        amount = user_baseline * multiplier
+        logger.info(
+            "forecast completed category=%s baseline_month_count=%s target_month=%s",
+            category,
+            len(baseline_months),
+            str(target_period),
+        )
+        points.append(
+            ForecastPoint(
+                category=category,
+                month=str(target_period),
+                quarter=str(target_quarter),
+                amount=_round_to_whole_peso(amount),
+                user_baseline_amount=round(user_baseline, 2),
+                hfce_multiplier=round(multiplier, 6),
+                hfce_forecast_amount_million_php=round(national_forecast, 2),
+                explanation=f"Monthly {category} plan based on your monthly baseline and HFCE trend.",
+            )
+        )
+    return points
