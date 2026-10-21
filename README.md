@@ -19,11 +19,12 @@ Training scripts, datasets, PFP/SVM, anomaly detection, old forecasters, PyTorch
 Use Python 3.14.4, matching the artifact release, and [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv sync --locked --no-dev
 cp .env.example .env
 # Set ODIN_TRUSTED_HISTORY_SHARED_SECRET to the secret used by Odin API.
 ./start.sh
 ```
+
+`./start.sh` starts all three capabilities in one service: SARIMA forecasting, rule-based classification, and linear programming recommendations. If the virtual environment or Uvicorn is missing, it installs the locked runtime dependencies using uv. It exits with setup instructions if uv or the signing secret is missing.
 
 The launcher binds to `127.0.0.1:8000` by default. Set `HOST` and `PORT` in `.env` if needed. It runs one worker, caps accepted concurrent connections at 16, and sets numerical thread counts to one. It does not enable reload. Configure a process supervisor to restart it on failure.
 
