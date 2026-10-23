@@ -1,0 +1,67 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-ml
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.LIGHTSAIL_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/lightsail
+          chmod 600 ~/.ssh/lightsail
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Pull, sync, and restart
+        env:
+          HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          ssh -i ~/.ssh/lightsail -o IdentitiesOnly=yes "ubuntu@$HOST" "bash -s" -- "$SHA" <<'EOF'
+          set -euo pipefail
+          sha="$1"
+          repo=/srv/budgie/budgie-ml-service
+
+          echo "==> Pull"
+          sudo -u budgie git -C "$repo" fetch --prune origin main
+          sudo -u budgie git -C "$repo" merge --ff-only "$sha"
+
+          echo "==> Sync dependencies"
+          sudo -iu budgie bash -c "cd $repo && uv sync --locked --no-dev"
+
+          echo "==> Restart"
+          sudo systemctl restart budgie-ml
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health; then
+              echo
+              echo "Deployed $(sudo -u budgie git -C "$repo" log -1 --oneline)"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "Health check failed" >&2
+          sudo systemctl status budgie-ml --no-pager || true
+          sudo tail -n 50 /var/log/budgie/ml.log || true
+          exit 1
+          EOF
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f ~/.ssh/lightsail
