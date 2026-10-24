@@ -25,6 +25,10 @@ class ForecastPoint(BaseModel):
     hfce_multiplier: float
     hfce_forecast_amount_million_php: float
     explanation: str
+    # same_quarter_last_year (12+ months), median_monthly (6-11 months), or recency_weighted_provisional (<6 months).
+    baseline_method: str
+    # True when the history is too short to show this user's seasonal pattern.
+    seasonal_uncertainty: bool
 
 
 class ForecastQuality(StrEnum):

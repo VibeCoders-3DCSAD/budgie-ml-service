@@ -63,7 +63,12 @@ async def predict(
         ],
         model_version=model_version,
         generated_at=datetime.now(UTC),
-        quality=ForecastQuality.PERSONALIZED,
+        # Under six months of history the amounts are provisional, not a reliable personal forecast.
+        quality=(
+            ForecastQuality.INSUFFICIENT_DATA
+            if any(point.baseline_method == forecast_service.PROVISIONAL for point in points)
+            else ForecastQuality.PERSONALIZED
+        ),
     )
     return ForecastResponse(
         response_id=str(uuid.uuid4()),
@@ -76,6 +81,6 @@ async def predict(
         metadata=ApiMetadata(
             processing_time_ms=round((time.perf_counter() - start) * 1000, 2),
             model_version=model_version,
-            strategy_used="user_quarterly_baseline_times_hfce_category_multiplier",
+            strategy_used=f"{points[0].baseline_method}_times_hfce_category_multiplier",
         ),
     )
