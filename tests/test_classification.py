@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
+from app.schemas.classification import ClassificationV2Request
+from app.services.classification_service import classify
 from tests.conftest import trusted_post
 
 
@@ -134,3 +138,39 @@ def test_classification_rejects_out_of_range_self_report(client):
         _payload(self_reported_revolving_months=13),
     )
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("duration", "label"),
+    [
+        ("no_credit_card", "NO_CREDIT_CARD"),
+        ("always_before_due", "TRANSACTOR"),
+        ("1_to_11_months", "LIGHT_REVOLVER"),
+        ("over_a_year", "HEAVY_REVOLVER"),
+    ],
+)
+def test_classification_preserves_reported_duration_without_exact_months(duration, label):
+    request = ClassificationV2Request.model_validate(
+        _payload(self_reported_revolving_range=duration)
+    )
+    [assessment] = classify(request).credit_card_behavior
+    assert assessment.label == label
+    assert assessment.value is None
+    assert assessment.reported_duration == duration
+    assert assessment.source == "self_reported"
+
+
+def test_classification_observed_history_overrides_reported_duration():
+    cycles = [
+        {"completed_on": f"2025-{month:02d}-28", "revolving_balance": 0} for month in range(1, 13)
+    ]
+    request = ClassificationV2Request.model_validate(
+        _payload(
+            credit_card_accounts=[{"account_id": "card-1", "cycles": cycles}],
+            self_reported_revolving_range="over_a_year",
+        )
+    )
+    [assessment] = classify(request).credit_card_behavior
+    assert assessment.label == "TRANSACTOR"
+    assert assessment.source == "observed_history"
+    assert assessment.reported_duration is None

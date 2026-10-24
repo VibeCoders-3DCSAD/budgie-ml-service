@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.common import ApiMetadata, ModuleStatus
 
+RevolvingRange = Literal["no_credit_card", "always_before_due", "1_to_11_months", "over_a_year"]
+
 
 class ClassificationDataStatus(StrEnum):
     SUCCESS = "SUCCESS"
@@ -43,6 +45,7 @@ class ClassificationV2Request(BaseModel):
     credit_card_accounts: list[CreditCardAccount] | None = Field(default=None, max_length=50)
     # Used only when no observed card history is supplied.
     self_reported_revolving_months: int | None = Field(default=None, ge=0, le=12)
+    self_reported_revolving_range: RevolvingRange | None = None
 
 
 class RuleAssessment(BaseModel):
@@ -56,6 +59,7 @@ class RuleAssessment(BaseModel):
 class CreditCardAssessment(RuleAssessment):
     account_id: str
     source: Literal["observed_history", "self_reported"] = "observed_history"
+    reported_duration: RevolvingRange | None = None
 
 
 class ClassificationV2Result(BaseModel):
