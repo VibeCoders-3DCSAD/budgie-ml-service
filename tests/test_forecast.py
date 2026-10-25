@@ -394,6 +394,95 @@ def test_forecast_with_a_full_year_adds_seasonal_spending_only_to_its_month():
     assert {point.baseline_method for point in points} == {"same_period_last_year"}
 
 
+def _education_model() -> ModuleModel:
+    model = _food_model()  # endog = Q4'25 100, Q1'26 110, Q2'26 90, Q3'26 100; forecasts 120
+    model.model["education"] = dict(model.model["food"])
+    return model
+
+
+def _education(day: str, amount: float, **fields) -> dict:
+    return {**_food_expense(day, amount), "category": "education", **fields}
+
+
+def _education_forecast(history: list[dict], months: list[str]) -> list:
+    return forecast_service.forecast_months(
+        _education_model(), history, ["education"], months, as_of=date(2026, 10, 21)
+    )
+
+
+def test_forecast_with_a_full_year_follows_last_years_calendar_for_seasonal_spending():
+    # Tuition of PHP 14,000 from January to June 2026 and nothing from July to December.
+    november, january = _education_forecast(_seasonal_history(), ["2026-11", "2027-01"])
+
+    assert (november.amount, november.user_baseline_amount) == (0.0, 0.0)
+    assert "outside January to June" in november.explanation
+    # June's typical tuition month walks July through January: Q3'26 100 / Q2'26 90, then Q4's 1.2.
+    assert january.user_baseline_amount == 14_000.0
+    assert january.hfce_multiplier == pytest.approx(100 / 90 * 1.2)
+    assert january.amount == 18_667.0
+    assert "typical month of January to June" in january.explanation
+
+
+def test_forecast_with_a_full_year_follows_two_school_terms():
+    history = [
+        *_flat_food_history(),
+        *[
+            _education(f"2026-{month:02d}-10", 10_000.0 if month < 4 else 12_000.0)
+            for month in [1, 2, 3, 6, 7, 8]
+        ],
+    ]
+
+    december, february, june = _education_forecast(history, ["2026-12", "2027-02", "2027-06"])
+
+    assert december.amount == 0.0
+    # The latest term, June to August, sets the typical month at PHP 12,000 for both terms.
+    assert {february.user_baseline_amount, june.user_baseline_amount} == {12_000.0}
+    assert "January to March and June to August" in february.explanation
+
+
+def test_forecast_with_a_full_year_keeps_a_new_expense_running():
+    # Started in July and paid every month since: it has not been seen to stop, so it continues.
+    history = [
+        *_flat_food_history(),
+        *[_education(f"2026-0{month}-10", 2_000.0) for month in [7, 8, 9]],
+    ]
+
+    [december] = _education_forecast(history, ["2026-12"])
+
+    assert december.user_baseline_amount == 2_000.0
+    assert december.amount == 2_400.0
+    assert "from your 2026-09 spending" in december.explanation
+
+
+def test_forecast_with_a_full_year_spreads_scattered_months_over_the_year():
+    history = [
+        *_flat_food_history(),
+        *[
+            _education(day, 3_000.0)
+            for day in ["2025-11-10", "2026-02-10", "2026-05-10", "2026-08-10"]
+        ],
+    ]
+
+    [december] = _education_forecast(history, ["2026-12"])
+
+    # No stretch lasts two months, so the year's PHP 12,000 averages PHP 1,000 a month.
+    assert december.user_baseline_amount == 1_000.0
+    assert december.amount == 1_200.0
+
+
+def test_forecast_brings_back_a_yearly_payment_outside_a_seasonal_categorys_months():
+    # The August uniform is marked yearly, so it stays out of the on and off months and recurs on its own.
+    history = [*_seasonal_history(), _education("2026-08-10", 5_000.0, recurrence="yearly")]
+
+    [august] = _education_forecast(history, ["2027-08"])
+
+    assert august.user_baseline_amount == 0.0
+    # Q3'27 120 / Q3'26 100.
+    assert august.seasonal_amount == 6_000.0
+    assert august.amount == 6_000.0
+    assert "2026-08 seasonal spending" in august.explanation
+
+
 def test_forecast_adds_no_seasonal_spending_until_last_years_month_completes():
     history = [*_seasonal_history(), _food_expense("2026-10-10", 1_500.0)]
 
@@ -463,6 +552,41 @@ def test_predict_rejects_both_target_month_kinds(client):
         "historical_transactions": [_food_expense(_tenth_of_month_before(1), 1_300.0)],
         "target_month": month,
         "target_months": [month],
+    }
+
+    response = trusted_post(client, "/api/v1/forecast/predict", payload, "test-user-hfce")
+
+    assert response.status_code == 422
+
+
+def test_predict_forecasts_a_past_month_as_of_its_first_day(client):
+    last_month = _tenth_of_month_before(1)[:7]
+    payload = {
+        "user_id": "test-user-hfce",
+        "categories": ["food"],
+        "historical_transactions": [
+            _food_expense(_tenth_of_month_before(2), 1_300.0),
+            _food_expense(_tenth_of_month_before(1), 9_000.0),
+        ],
+        "target_months": [last_month],
+        "as_of": f"{last_month}-01",
+    }
+
+    response = trusted_post(client, "/api/v1/forecast/predict", payload, "test-user-hfce")
+
+    assert response.status_code == 200
+    point = response.json()["forecasts"][0]
+    assert point["month"] == last_month
+    # Last month's own spending came after the forecast date, so the month before it is the baseline.
+    assert point["user_baseline_amount"] == 1_300.0
+
+
+def test_predict_rejects_an_as_of_date_in_the_future(client):
+    payload = {
+        "user_id": "test-user-hfce",
+        "categories": ["food"],
+        "historical_transactions": [_food_expense(_tenth_of_month_before(1), 1_300.0)],
+        "as_of": (forecast_service.manila_today() + timedelta(days=1)).isoformat(),
     }
 
     response = trusted_post(client, "/api/v1/forecast/predict", payload, "test-user-hfce")

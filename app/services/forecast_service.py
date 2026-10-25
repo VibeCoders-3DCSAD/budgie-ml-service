@@ -4,6 +4,7 @@ import logging
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
+from itertools import groupby
 
 import numpy as np
 import pandas as pd
@@ -25,6 +26,12 @@ MONTHS_PER_YEAR = 12
 FULL_YEAR_MONTHS = 12
 # A month above Q3 + 1.5 * IQR of the year's category totals holds seasonal spending, such as tuition.
 SPIKE_IQR_FACTOR = 1.5
+# A month counts as spending on a category above this share of its median spending month.
+ACTIVE_MONTH_SHARE = 0.1
+# A seasonal category, such as school terms, turns on and off in at most this many stretches a year,
+# each on and off stretch lasting at least the minimum, so a single skipped month stays noise.
+MAX_SEASONS = 2
+MIN_SEASON_MONTHS = 2
 ROBUST_BASELINE_MONTHS = 6
 SAME_PERIOD_LAST_YEAR = "same_period_last_year"
 MEDIAN_MONTHLY = "median_monthly"
@@ -132,6 +139,48 @@ def _spike_months(values: np.ndarray) -> np.ndarray:
     return values > q3 + SPIKE_IQR_FACTOR * (q3 - q1)
 
 
+SEASONAL = "seasonal"
+NEW_EXPENSE = "new_expense"
+
+
+def _on_months(values: np.ndarray) -> tuple[str | None, list[list[int]]]:
+    """How a category's spending turns on and off over the year, with its on stretches as window indices.
+
+    SEASONAL switches on and off with the calendar, such as school terms. NEW_EXPENSE is a single stretch
+    still running last month that began within the year: it has not been seen to stop. Spending in every
+    month, or in scattered months, returns None.
+    """
+    positive = values[values > 0]
+    if positive.size == 0:
+        return None, []
+    active = values > ACTIVE_MONTH_SHARE * float(np.median(positive))
+    if active.all():
+        return None, []
+    months = len(active)
+    # Walk the year from the first off month after an on month, so no stretch splits at the wrap.
+    start = next(i for i in range(months) if not active[i] and active[i - 1])
+    order = [(start + offset) % months for offset in range(months)]
+    stretches = [
+        (on, list(indices)) for on, indices in groupby(order, key=lambda i: bool(active[i]))
+    ]
+    seasons = [indices for on, indices in stretches if on]
+    if len(seasons) > MAX_SEASONS or any(
+        len(indices) < MIN_SEASON_MONTHS for _, indices in stretches
+    ):
+        return None, []
+    if len(seasons) == 1 and months - 1 in seasons[0] and 0 not in seasons[0]:
+        return NEW_EXPENSE, seasons
+    return SEASONAL, seasons
+
+
+def _season_names(window: list[pd.Period], seasons: list[list[int]]) -> str:
+    """The on stretches as calendar months, such as "January to June"."""
+    return " and ".join(
+        f"{window[indices[0]].strftime('%B')} to {window[indices[-1]].strftime('%B')}"
+        for indices in sorted(seasons, key=lambda indices: window[indices[0]].month)
+    )
+
+
 def _walk_forward_multiplier(
     national: pd.Series, last_month: pd.Period, target_period: pd.Period
 ) -> float:
@@ -155,14 +204,18 @@ def _seasonal_forecast(
     window: list[pd.Period],
     target_period: pd.Period,
     national: pd.Series,
-) -> tuple[float, float, float, pd.Period | None, pd.Period | None]:
+) -> tuple[float, float, float, pd.Period | None, pd.Period | None, str | None]:
     """A full year's forecast: last month walked forward by HFCE, plus last year's seasonal spending.
 
     The walk starts from last month unless it was a spike month or had no spending, in which case the
     typical month stands in. Spike months and payments the user marked yearly never start the walk;
     they come back only in the month they recur, grown by HFCE over the year.
+    A category that switches on and off with the calendar follows last year's months instead: its
+    typical month from the latest on stretch, walked forward from that stretch's end, in the months it
+    was on, and nothing in the months it was off. Yearly payments still come back in their month.
     Returns the starting amount, the walk-forward multiplier, the seasonal amount, the month the
-    seasonal amount came from, and the month the walk started from (None for the typical month).
+    seasonal amount came from, the month the walk started from (None for the typical month), and the
+    calendar months the category is on (None unless it is seasonal).
     """
     in_category = expenses.loc[expenses["category"].eq(category)]
     months = in_category["date"].dt.to_period("M")
@@ -174,25 +227,41 @@ def _seasonal_forecast(
     monthly = in_category.loc[~is_yearly].groupby(months[~is_yearly])["amount"].sum()
     yearly = in_category.loc[is_yearly].groupby(months[is_yearly])["amount"].sum()
     values = np.array([float(monthly.get(month, 0.0)) for month in window], dtype="float64")
-    spikes = _spike_months(values)
-    base = float(values[~spikes].mean())
-    last_is_typical = not spikes[-1] and values[-1] > 0
-    start = float(values[-1]) if last_is_typical else base
-    start_month = window[-1] if last_is_typical else None
-    multiplier = _walk_forward_multiplier(national, window[-1], target_period)
+    pattern, seasons = _on_months(values)
     prior_month = target_period - MONTHS_PER_YEAR
-    if prior_month not in window:
-        return start, multiplier, 0.0, None, start_month
-    prior_index = window.index(prior_month)
-    excess = values[prior_index] - base if spikes[prior_index] else 0.0
-    last_year = excess + float(yearly.get(prior_month, 0.0))
+    in_window = prior_month in window
+    if pattern == NEW_EXPENSE:
+        # Its months would read as spikes against the empty months before it began.
+        start, start_month = float(values[-1]), window[-1]
+        multiplier = _walk_forward_multiplier(national, window[-1], target_period)
+        last_year = float(yearly.get(prior_month, 0.0)) if in_window else 0.0
+    elif pattern == SEASONAL:
+        latest = max(seasons, key=max)
+        on_months = {window[index].month for indices in seasons for index in indices}
+        start = float(np.median(values[latest])) if target_period.month in on_months else 0.0
+        multiplier = _walk_forward_multiplier(national, window[max(latest)], target_period)
+        start_month = None
+        last_year = float(yearly.get(prior_month, 0.0)) if in_window else 0.0
+    else:
+        spikes = _spike_months(values)
+        base = float(values[~spikes].mean())
+        last_is_typical = not spikes[-1] and values[-1] > 0
+        start = float(values[-1]) if last_is_typical else base
+        start_month = window[-1] if last_is_typical else None
+        multiplier = _walk_forward_multiplier(national, window[-1], target_period)
+        last_year = 0.0
+        if in_window:
+            prior_index = window.index(prior_month)
+            excess = values[prior_index] - base if spikes[prior_index] else 0.0
+            last_year = excess + float(yearly.get(prior_month, 0.0))
+    season_names = _season_names(window, seasons) if pattern == SEASONAL else None
     if last_year == 0.0:
-        return start, multiplier, 0.0, None, start_month
+        return start, multiplier, 0.0, None, start_month, season_names
     prior_quarter = prior_month.asfreq("Q")
     if prior_quarter not in national.index:
         raise ValueError("forecast data is unavailable for the baseline months")
     growth = float(national[target_period.asfreq("Q")]) / float(national[prior_quarter])
-    return start, multiplier, last_year * growth, prior_month, start_month
+    return start, multiplier, last_year * growth, prior_month, start_month, season_names
 
 
 def _explanation(
@@ -201,10 +270,18 @@ def _explanation(
     baseline_months: list[str],
     spike_month: pd.Period | None = None,
     start_month: pd.Period | None = None,
+    seasons: str | None = None,
+    in_season: bool = False,
 ) -> str:
     if method == SAME_PERIOD_LAST_YEAR:
         start = f"your {start_month} spending" if start_month else "your typical month"
         plan = f"Monthly {category} plan from {start}, grown month by month with HFCE"
+        if seasons and in_season:
+            plan = f"Monthly {category} plan from your typical month of {seasons}, grown month by month with HFCE"
+        elif seasons:
+            plan = (
+                f"No {category} spending planned outside {seasons}, when you spent on it last year"
+            )
         return f"{plan}, plus your {spike_month} seasonal spending." if spike_month else f"{plan}."
     if method == MEDIAN_MONTHLY:
         return (
@@ -272,8 +349,9 @@ def forecast(
         seasonal_amount = 0.0
         spike_month = None
         start_month = None
+        seasons = None
         if seasonal:
-            user_baseline, multiplier, seasonal_amount, spike_month, start_month = (
+            user_baseline, multiplier, seasonal_amount, spike_month, start_month, seasons = (
                 _seasonal_forecast(expenses, category, window, target_period, national)
             )
             baseline_months = [str(month) for month in window]
@@ -310,7 +388,13 @@ def forecast(
                 seasonal_amount=round(seasonal_amount, 2),
                 hfce_forecast_amount_million_php=round(national_forecast, 2),
                 explanation=_explanation(
-                    category, method, baseline_months, spike_month, start_month
+                    category,
+                    method,
+                    baseline_months,
+                    spike_month,
+                    start_month,
+                    seasons,
+                    user_baseline > 0,
                 ),
                 baseline_method=method,
                 # Only a full year of history shows when in the year this user's spending rises and falls.

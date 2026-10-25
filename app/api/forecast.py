@@ -39,6 +39,8 @@ async def predict(
     require_trusted_user(history, request.user_id)
     if registry.hfce_sarima is None:
         raise HTTPException(status_code=503, detail="HFCE forecast is unavailable")
+    if request.as_of is not None and request.as_of > forecast_service.manila_today():
+        raise HTTPException(status_code=422, detail="as_of cannot be in the future")
 
     start = time.perf_counter()
     try:
@@ -49,6 +51,7 @@ async def predict(
                 [transaction.model_dump() for transaction in request.historical_transactions],
                 request.categories,
                 request.target_months or [request.target_month],
+                as_of=request.as_of,
                 user_id=request.user_id,
             )
     except ValueError as exc:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Annotated
 
@@ -22,6 +22,8 @@ class ForecastRequest(BaseModel):
     target_months: list[Annotated[str, Field(pattern=MONTH_PATTERN)]] | None = Field(
         default=None, min_length=1, max_length=MAX_FORECAST_MONTHS + 1
     )
+    # The day to forecast from, so a past month's forecast can be compared with what was spent; defaults to today.
+    as_of: date | None = None
 
     @model_validator(mode="after")
     def allow_one_target_kind(self) -> ForecastRequest:
