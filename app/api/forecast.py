@@ -44,22 +44,23 @@ async def predict(
     try:
         async with limiter:
             points = await run_in_threadpool(
-                forecast_service.forecast,
+                forecast_service.forecast_months,
                 registry.hfce_sarima,
                 [transaction.model_dump() for transaction in request.historical_transactions],
                 request.categories,
+                request.target_months or [request.target_month],
                 user_id=request.user_id,
-                target_month=request.target_month,
             )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     model_version = registry.hfce_sarima.model_id
+    first_month = [point for point in points if point.month == points[0].month]
     snapshot = ExpenseForecastSnapshot(
         month=points[0].month,
-        total_amount=round(sum(point.amount for point in points), 2),
+        total_amount=round(sum(point.amount for point in first_month), 2),
         category_forecasts=[
-            ForecastedExpense(category=point.category, amount=point.amount) for point in points
+            ForecastedExpense(category=point.category, amount=point.amount) for point in first_month
         ],
         model_version=model_version,
         generated_at=datetime.now(UTC),

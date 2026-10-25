@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -18,12 +19,12 @@ logger = logging.getLogger(__name__)
 BASELINE_LOOKBACK_MONTHS = 12
 # A category whose latest completed-month spend is this many months old is stale.
 STALE_CATEGORY_MONTHS = 6
-QUARTERS_PER_YEAR = 4
-# How much completed history decides the baseline: a full year follows the same quarter last year,
+MONTHS_PER_YEAR = 12
+# How much completed history decides the baseline: a full year follows the same month last year,
 # six to eleven months use the median month, and less than six months is provisional.
 FULL_YEAR_MONTHS = 12
 ROBUST_BASELINE_MONTHS = 6
-SAME_QUARTER_LAST_YEAR = "same_quarter_last_year"
+SAME_PERIOD_LAST_YEAR = "same_period_last_year"
 MEDIAN_MONTHLY = "median_monthly"
 PROVISIONAL = "recency_weighted_provisional"
 
@@ -100,7 +101,7 @@ def _history_window(expenses: pd.DataFrame, as_of: date) -> list[pd.Period]:
 
 def _baseline_method(history_months: int) -> str:
     if history_months >= FULL_YEAR_MONTHS:
-        return SAME_QUARTER_LAST_YEAR
+        return SAME_PERIOD_LAST_YEAR
     if history_months >= ROBUST_BASELINE_MONTHS:
         return MEDIAN_MONTHLY
     return PROVISIONAL
@@ -116,19 +117,27 @@ def _median_monthly_baseline(
     return float(np.median(values)), values, [str(month) for month in window]
 
 
-def _same_quarter_last_year_baseline(
-    expenses: pd.DataFrame, category: str, as_of: date, target_quarter: pd.Period
+def _same_period_last_year_baseline(
+    expenses: pd.DataFrame, category: str, as_of: date, target_period: pd.Period
 ) -> tuple[float, np.ndarray, list[str]] | None:
-    """Average monthly spend in the target quarter one year earlier, counting months without spend as zero."""
+    """Spend in the target month one year earlier, counting no spend as zero.
+
+    HFCE is quarterly, so the multiplier is flat within a quarter and month-to-month shape comes from
+    this baseline. Until last year's month is complete, the completed months of its quarter stand in.
+    """
     current_month = pd.Period(as_of, freq="M")
-    prior_quarter = target_quarter - QUARTERS_PER_YEAR
-    months = [
-        month
-        for month in pd.period_range(
-            prior_quarter.asfreq("M", "start"), prior_quarter.asfreq("M", "end"), freq="M"
-        )
-        if current_month - BASELINE_LOOKBACK_MONTHS <= month < current_month
-    ]
+    prior_month = target_period - MONTHS_PER_YEAR
+    if prior_month < current_month:
+        months = [prior_month]
+    else:
+        prior_quarter = prior_month.asfreq("Q")
+        months = [
+            month
+            for month in pd.period_range(
+                prior_quarter.asfreq("M", "start"), prior_quarter.asfreq("M", "end"), freq="M"
+            )
+            if current_month - BASELINE_LOOKBACK_MONTHS <= month < current_month
+        ]
     if not months:
         return None
     in_category = expenses.loc[expenses["category"].eq(category)]
@@ -137,9 +146,11 @@ def _same_quarter_last_year_baseline(
     return float(values.mean()), values, [str(month) for month in months]
 
 
-def _explanation(category: str, method: str, target_quarter: pd.Period) -> str:
-    if method == SAME_QUARTER_LAST_YEAR:
-        return f"Monthly {category} plan based on your {target_quarter - QUARTERS_PER_YEAR} spending and HFCE trend."
+def _explanation(category: str, method: str, baseline_months: list[str]) -> str:
+    if method == SAME_PERIOD_LAST_YEAR:
+        first = pd.Period(baseline_months[0], freq="M")
+        period = str(first) if len(baseline_months) == 1 else str(first.asfreq("Q"))
+        return f"Monthly {category} plan based on your {period} spending and HFCE trend."
     if method == MEDIAN_MONTHLY:
         return (
             f"Monthly {category} plan based on your typical (median) month and HFCE growth; "
@@ -177,7 +188,7 @@ def forecast(
     target_quarter = target_period.asfreq("Q")
     window = _history_window(expenses, as_of)
     method = _baseline_method(len(window))
-    seasonal = method == SAME_QUARTER_LAST_YEAR
+    seasonal = method == SAME_PERIOD_LAST_YEAR
     points = []
     for category in dict.fromkeys(categories):
         artifact = model.model.get(category)
@@ -192,7 +203,7 @@ def forecast(
         )
         baseline_weights = np.arange(1, len(monthly_history) + 1, dtype="float64")
         seasonal_baseline = (
-            _same_quarter_last_year_baseline(expenses, category, as_of, target_quarter)
+            _same_period_last_year_baseline(expenses, category, as_of, target_period)
             if seasonal
             else None
         )
@@ -205,9 +216,7 @@ def forecast(
             )
             baseline_weights = np.ones(len(monthly_history), dtype="float64")
         point_method = (
-            PROVISIONAL
-            if method == SAME_QUARTER_LAST_YEAR and seasonal_baseline is None
-            else method
+            PROVISIONAL if method == SAME_PERIOD_LAST_YEAR and seasonal_baseline is None else method
         )
 
         artifact_quarter = pd.Period(artifact["period_end"], freq="Q")
@@ -241,10 +250,29 @@ def forecast(
                 user_baseline_amount=round(user_baseline, 2),
                 hfce_multiplier=round(multiplier, 6),
                 hfce_forecast_amount_million_php=round(national_forecast, 2),
-                explanation=_explanation(category, point_method, target_quarter),
+                explanation=_explanation(category, point_method, baseline_months),
                 baseline_method=point_method,
                 # Only a full year of history shows when in the year this user's spending rises and falls.
-                seasonal_uncertainty=point_method != SAME_QUARTER_LAST_YEAR,
+                seasonal_uncertainty=point_method != SAME_PERIOD_LAST_YEAR,
             )
         )
     return points
+
+
+def forecast_months(
+    model: ModuleModel,
+    transactions: list[dict],
+    categories: list[str],
+    target_months: Sequence[str | None],
+    as_of: date | None = None,
+    user_id: str | None = None,
+) -> list[ForecastPoint]:
+    """Forecast each target month in order; None stands for the next calendar month."""
+    as_of = as_of or date.today()
+    return [
+        point
+        for target_month in target_months
+        for point in forecast(
+            model, transactions, categories, as_of=as_of, user_id=user_id, target_month=target_month
+        )
+    ]

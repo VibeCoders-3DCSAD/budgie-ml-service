@@ -248,9 +248,7 @@ def _seasonal_history() -> list[dict]:
     ("target_month", "education", "food"),
     [("2026-11", 0.0, 1_200.0), ("2027-01", 15_273.0, 1_091.0), ("2027-07", 0.0, 1_200.0)],
 )
-def test_forecast_with_a_full_year_follows_the_same_quarter_last_year(
-    target_month, education, food
-):
+def test_forecast_with_a_full_year_follows_the_same_month_last_year(target_month, education, food):
     model = _food_model()  # endog = Q4'25 100, Q1'26 110, Q2'26 90, Q3'26 100; forecasts 120
     model.model["education"] = dict(model.model["food"])
 
@@ -264,7 +262,78 @@ def test_forecast_with_a_full_year_follows_the_same_quarter_last_year(
 
     amounts = {point.category: point.amount for point in points}
     assert amounts == {"food": food, "education": education}
-    assert all("2025Q4" in point.explanation or target_month != "2026-11" for point in points)
+    assert all("2025-11" in point.explanation or target_month != "2026-11" for point in points)
+
+
+def test_forecast_with_a_full_year_gives_each_month_of_a_quarter_its_own_amount():
+    model = _food_model()  # Q4'25 HFCE 100, forecast Q4'26 120: multiplier 1.2 for every Q4 month
+    history = [
+        *_seasonal_history(),
+        _food_expense("2025-12-20", 2_000.0),  # Christmas: December 2025 totals PHP 3,000
+    ]
+
+    points = forecast_service.forecast_months(
+        model, history, ["food"], ["2026-11", "2026-12"], as_of=date(2026, 10, 21)
+    )
+
+    assert [(point.month, point.amount) for point in points] == [
+        ("2026-11", 1_200.0),
+        ("2026-12", 3_600.0),
+    ]
+    assert {point.hfce_multiplier for point in points} == {1.2}
+    assert {point.baseline_method for point in points} == {"same_period_last_year"}
+
+
+def test_forecast_uses_last_years_completed_quarter_months_until_its_month_completes():
+    history = [*_seasonal_history(), _food_expense("2026-10-10", 1_500.0)]
+
+    # November 2026 is still in progress, so November 2027 follows the completed 2026Q4 months.
+    point = forecast_service.forecast(
+        _food_model(), history, ["food"], as_of=date(2026, 11, 21), target_month="2027-11"
+    )[0]
+
+    assert point.baseline_method == "same_period_last_year"
+    assert point.user_baseline_amount == 1_500.0  # October 2026, the only completed 2026Q4 month
+    assert "2026-10 spending" in point.explanation
+
+
+def test_predict_forecasts_several_target_months_in_one_call(client):
+    payload = {
+        "user_id": "test-user-hfce",
+        "categories": ["food"],
+        "historical_transactions": [
+            {
+                "date": _tenth_of_month_before(1),
+                "amount": 1_300.0,
+                "category": "food",
+                "transaction_type": "expense",
+            }
+        ],
+        "target_months": [_tenth_of_month_before(-1)[:7], _tenth_of_month_before(-2)[:7]],
+    }
+
+    response = trusted_post(client, "/api/v1/forecast/predict", payload, "test-user-hfce")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [point["month"] for point in body["forecasts"]] == payload["target_months"]
+    assert body["snapshot"]["month"] == payload["target_months"][0]
+    assert body["snapshot"]["total_amount"] == body["forecasts"][0]["amount"]
+
+
+def test_predict_rejects_both_target_month_kinds(client):
+    month = _tenth_of_month_before(-1)[:7]
+    payload = {
+        "user_id": "test-user-hfce",
+        "categories": ["food"],
+        "historical_transactions": [_food_expense(_tenth_of_month_before(1), 1_300.0)],
+        "target_month": month,
+        "target_months": [month],
+    }
+
+    response = trusted_post(client, "/api/v1/forecast/predict", payload, "test-user-hfce")
+
+    assert response.status_code == 422
 
 
 def test_forecast_with_six_to_eleven_months_uses_the_median_month_and_flags_seasonality():
@@ -300,7 +369,7 @@ def test_forecast_median_counts_months_without_spending_as_zero():
 @pytest.mark.parametrize(
     ("start", "method"),
     [
-        ("2025-10-01", "same_quarter_last_year"),
+        ("2025-10-01", "same_period_last_year"),
         ("2026-04-01", "median_monthly"),
         ("2026-05-01", "recency_weighted_provisional"),
     ],
@@ -311,7 +380,7 @@ def test_forecast_picks_its_baseline_from_completed_history_length(start, method
     points = forecast_service.forecast(_food_model(), history, ["food"], as_of=date(2026, 10, 21))
 
     assert points[0].baseline_method == method
-    assert points[0].seasonal_uncertainty is (method != "same_quarter_last_year")
+    assert points[0].seasonal_uncertainty is (method != "same_period_last_year")
 
 
 def test_forecast_with_a_full_year_keeps_a_yearly_category_current():
@@ -322,14 +391,14 @@ def test_forecast_with_a_full_year_keeps_a_yearly_category_current():
         {**_food_expense("2025-12-10", 6_000.0), "category": "clothing_footwear"},
     ]
 
-    november, april = (
+    december, april = (
         forecast_service.forecast(
             model, history, ["clothing_footwear"], as_of=date(2026, 10, 21), target_month=month
         )[0]
-        for month in ["2026-11", "2027-04"]
+        for month in ["2026-12", "2027-04"]
     )
 
-    assert november.user_baseline_amount == 2_000.0  # PHP 6,000 across October to December 2025
+    assert december.user_baseline_amount == 6_000.0  # December 2025
     assert april.amount == 0.0
 
 

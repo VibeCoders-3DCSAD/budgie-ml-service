@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.common import ApiMetadata, ModuleStatus, Transaction
+
+MONTH_PATTERN = r"^\d{4}-(0[1-9]|1[0-2])$"
 
 
 class ForecastRequest(BaseModel):
@@ -13,7 +16,20 @@ class ForecastRequest(BaseModel):
     historical_transactions: list[Transaction] = Field(min_length=1, max_length=10_000)
     categories: list[str] = Field(min_length=1, max_length=12)
     # Month to forecast (YYYY-MM); defaults to the next calendar month.
-    target_month: str | None = Field(default=None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    target_month: str | None = Field(default=None, pattern=MONTH_PATTERN)
+    # Several months in one call, e.g. a year of monthly forecasts; the snapshot covers the first.
+    target_months: list[Annotated[str, Field(pattern=MONTH_PATTERN)]] | None = Field(
+        default=None, min_length=1, max_length=12
+    )
+
+    @model_validator(mode="after")
+    def allow_one_target_kind(self) -> ForecastRequest:
+        if self.target_month is not None and self.target_months is not None:
+            raise ValueError("send target_month or target_months, not both")
+        months = self.target_months
+        if months is not None and len(set(months)) != len(months):
+            raise ValueError("target_months must not repeat a month")
+        return self
 
 
 class ForecastPoint(BaseModel):
@@ -25,7 +41,7 @@ class ForecastPoint(BaseModel):
     hfce_multiplier: float
     hfce_forecast_amount_million_php: float
     explanation: str
-    # same_quarter_last_year (12+ months), median_monthly (6-11 months), or recency_weighted_provisional (<6 months).
+    # same_period_last_year (12+ months), median_monthly (6-11 months), or recency_weighted_provisional (<6 months).
     baseline_method: str
     # True when the history is too short to show this user's seasonal pattern.
     seasonal_uncertainty: bool
