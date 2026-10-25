@@ -20,9 +20,11 @@ BASELINE_LOOKBACK_MONTHS = 12
 # A category whose latest completed-month spend is this many months old is stale.
 STALE_CATEGORY_MONTHS = 6
 MONTHS_PER_YEAR = 12
-# How much completed history decides the baseline: a full year follows the same month last year,
-# six to eleven months use the median month, and less than six months is provisional.
+# How much completed history decides the baseline: a full year splits a typical month from the
+# seasonal spending above it, six to eleven months use the median month, and less than six months is provisional.
 FULL_YEAR_MONTHS = 12
+# A month above Q3 + 1.5 * IQR of the year's category totals holds seasonal spending, such as tuition.
+SPIKE_IQR_FACTOR = 1.5
 ROBUST_BASELINE_MONTHS = 6
 SAME_PERIOD_LAST_YEAR = "same_period_last_year"
 MEDIAN_MONTHLY = "median_monthly"
@@ -117,40 +119,67 @@ def _median_monthly_baseline(
     return float(np.median(values)), values, [str(month) for month in window]
 
 
-def _same_period_last_year_baseline(
-    expenses: pd.DataFrame, category: str, as_of: date, target_period: pd.Period
-) -> tuple[float, np.ndarray, list[str]] | None:
-    """Spend in the target month one year earlier, counting no spend as zero.
+def _spike_months(values: np.ndarray) -> np.ndarray:
+    """Months whose total is an IQR outlier among the year's category totals."""
+    q1, q3 = np.percentile(values, [25, 75])
+    return values > q3 + SPIKE_IQR_FACTOR * (q3 - q1)
 
-    HFCE is quarterly, so the multiplier is flat within a quarter and month-to-month shape comes from
-    this baseline. Until last year's month is complete, the completed months of its quarter stand in.
+
+def _seasonal_forecast(
+    expenses: pd.DataFrame,
+    category: str,
+    window: list[pd.Period],
+    target_period: pd.Period,
+    national: pd.Series,
+) -> tuple[float, float, float, pd.Period | None]:
+    """A full year's forecast: a typical month scaled by HFCE, plus last year's seasonal spending.
+
+    HFCE drives the typical month, so a flat spender still sees the national quarterly shape. Spike
+    months and payments the user marked yearly stay out of that typical month and come back only in
+    the month they recur, grown by HFCE.
+    Returns the typical month, its HFCE multiplier, the seasonal amount, and the month it came from.
     """
-    current_month = pd.Period(as_of, freq="M")
-    prior_month = target_period - MONTHS_PER_YEAR
-    if prior_month < current_month:
-        months = [prior_month]
-    else:
-        prior_quarter = prior_month.asfreq("Q")
-        months = [
-            month
-            for month in pd.period_range(
-                prior_quarter.asfreq("M", "start"), prior_quarter.asfreq("M", "end"), freq="M"
-            )
-            if current_month - BASELINE_LOOKBACK_MONTHS <= month < current_month
-        ]
-    if not months:
-        return None
     in_category = expenses.loc[expenses["category"].eq(category)]
-    monthly = in_category.groupby(in_category["date"].dt.to_period("M"))["amount"].sum()
-    values = np.array([float(monthly.get(month, 0.0)) for month in months], dtype="float64")
-    return float(values.mean()), values, [str(month) for month in months]
+    months = in_category["date"].dt.to_period("M")
+    is_yearly = (
+        in_category["recurrence"].eq("yearly")
+        if "recurrence" in in_category
+        else pd.Series(False, index=in_category.index)
+    )
+    monthly = in_category.loc[~is_yearly].groupby(months[~is_yearly])["amount"].sum()
+    yearly = in_category.loc[is_yearly].groupby(months[is_yearly])["amount"].sum()
+    values = np.array([float(monthly.get(month, 0.0)) for month in window], dtype="float64")
+    spikes = _spike_months(values)
+    typical_quarters = [
+        month.asfreq("Q") for month, spike in zip(window, spikes, strict=True) if not spike
+    ]
+    if any(quarter not in national.index for quarter in typical_quarters):
+        raise ValueError("forecast data is unavailable for the baseline months")
+    base = float(values[~spikes].mean())
+    target_hfce = float(national[target_period.asfreq("Q")])
+    multiplier = target_hfce / float(national[typical_quarters].mean())
+    prior_month = target_period - MONTHS_PER_YEAR
+    if prior_month not in window:
+        return base, multiplier, 0.0, None
+    prior_index = window.index(prior_month)
+    excess = values[prior_index] - base if spikes[prior_index] else 0.0
+    last_year = excess + float(yearly.get(prior_month, 0.0))
+    if last_year == 0.0:
+        return base, multiplier, 0.0, None
+    seasonal = last_year * target_hfce / float(national[prior_month.asfreq("Q")])
+    return base, multiplier, seasonal, prior_month
 
 
-def _explanation(category: str, method: str, baseline_months: list[str]) -> str:
+def _explanation(
+    category: str,
+    method: str,
+    baseline_months: list[str],
+    target_quarter: pd.Period | None = None,
+    spike_month: pd.Period | None = None,
+) -> str:
     if method == SAME_PERIOD_LAST_YEAR:
-        first = pd.Period(baseline_months[0], freq="M")
-        period = str(first) if len(baseline_months) == 1 else str(first.asfreq("Q"))
-        return f"Monthly {category} plan based on your {period} spending and HFCE trend."
+        plan = f"Monthly {category} plan based on your typical month and the HFCE {target_quarter} trend"
+        return f"{plan}, plus your {spike_month} seasonal spending." if spike_month else f"{plan}."
     if method == MEDIAN_MONTHLY:
         return (
             f"Monthly {category} plan based on your typical (median) month and HFCE growth; "
@@ -202,22 +231,11 @@ def forecast(
             BASELINE_LOOKBACK_MONTHS + 1 if seasonal else STALE_CATEGORY_MONTHS,
         )
         baseline_weights = np.arange(1, len(monthly_history) + 1, dtype="float64")
-        seasonal_baseline = (
-            _same_period_last_year_baseline(expenses, category, as_of, target_period)
-            if seasonal
-            else None
-        )
-        if seasonal_baseline is not None:
-            user_baseline, monthly_history, baseline_months = seasonal_baseline
-            baseline_weights = np.ones(len(monthly_history), dtype="float64")
-        elif method == MEDIAN_MONTHLY:
+        if method == MEDIAN_MONTHLY:
             user_baseline, monthly_history, baseline_months = _median_monthly_baseline(
                 expenses, category, window
             )
             baseline_weights = np.ones(len(monthly_history), dtype="float64")
-        point_method = (
-            PROVISIONAL if method == SAME_PERIOD_LAST_YEAR and seasonal_baseline is None else method
-        )
 
         artifact_quarter = pd.Period(artifact["period_end"], freq="Q")
         forecast_steps = target_quarter.ordinal - artifact_quarter.ordinal
@@ -225,19 +243,29 @@ def forecast(
             raise ValueError("forecast data is unavailable for the target month")
         national = _hfce_quarterly_series(artifact, forecast_steps)
         national_forecast = float(national[target_quarter])
-        # Compare against national HFCE for the same quarters the user's baseline came from.
-        baseline_quarters = [pd.Period(month, freq="M").asfreq("Q") for month in baseline_months]
-        if any(quarter not in national.index for quarter in baseline_quarters):
-            raise ValueError("forecast data is unavailable for the baseline months")
-        national_baseline = float(
-            np.average(national[baseline_quarters].to_numpy(), weights=baseline_weights)
-        )
-        multiplier = national_forecast / national_baseline
-        amount = user_baseline * multiplier
+        seasonal_amount = 0.0
+        spike_month = None
+        if seasonal:
+            user_baseline, multiplier, seasonal_amount, spike_month = _seasonal_forecast(
+                expenses, category, window, target_period, national
+            )
+            baseline_months = [str(month) for month in window]
+        else:
+            # Compare against national HFCE for the same quarters the user's baseline came from.
+            baseline_quarters = [
+                pd.Period(month, freq="M").asfreq("Q") for month in baseline_months
+            ]
+            if any(quarter not in national.index for quarter in baseline_quarters):
+                raise ValueError("forecast data is unavailable for the baseline months")
+            national_baseline = float(
+                np.average(national[baseline_quarters].to_numpy(), weights=baseline_weights)
+            )
+            multiplier = national_forecast / national_baseline
+        amount = user_baseline * multiplier + seasonal_amount
         logger.info(
             "forecast completed category=%s method=%s baseline_month_count=%s target_month=%s",
             category,
-            point_method,
+            method,
             len(baseline_months),
             str(target_period),
         )
@@ -249,11 +277,14 @@ def forecast(
                 amount=_round_to_whole_peso(amount),
                 user_baseline_amount=round(user_baseline, 2),
                 hfce_multiplier=round(multiplier, 6),
+                seasonal_amount=round(seasonal_amount, 2),
                 hfce_forecast_amount_million_php=round(national_forecast, 2),
-                explanation=_explanation(category, point_method, baseline_months),
-                baseline_method=point_method,
+                explanation=_explanation(
+                    category, method, baseline_months, target_quarter, spike_month
+                ),
+                baseline_method=method,
                 # Only a full year of history shows when in the year this user's spending rises and falls.
-                seasonal_uncertainty=point_method != SAME_PERIOD_LAST_YEAR,
+                seasonal_uncertainty=method != SAME_PERIOD_LAST_YEAR,
             )
         )
     return points

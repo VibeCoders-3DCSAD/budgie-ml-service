@@ -244,28 +244,100 @@ def _seasonal_history() -> list[dict]:
     return transactions
 
 
-@pytest.mark.parametrize(
-    ("target_month", "education", "food"),
-    [("2026-11", 0.0, 1_200.0), ("2027-01", 15_273.0, 1_091.0), ("2027-07", 0.0, 1_200.0)],
-)
-def test_forecast_with_a_full_year_follows_the_same_month_last_year(target_month, education, food):
-    model = _food_model()  # endog = Q4'25 100, Q1'26 110, Q2'26 90, Q3'26 100; forecasts 120
-    model.model["education"] = dict(model.model["food"])
+def _flat_food_history() -> list[dict]:
+    """PHP 1,000 of food every month from October 2025 to September 2026."""
+    return [row for row in _seasonal_history() if row["category"] == "food"]
 
-    points = forecast_service.forecast(
-        model,
-        _seasonal_history(),
-        ["food", "education"],
-        as_of=date(2026, 10, 21),
-        target_month=target_month,
+
+def test_forecast_with_a_full_year_follows_hfce_quarterly_seasonality_for_a_flat_spender():
+    model = _food_model()
+    # Q4'25 116, Q1'26 100, Q2'26 95, Q3'26 100: Q4 runs 16% above Q3.
+    model.model["food"] = {
+        "family": "seasonal_naive",
+        "model": [116.0, 100.0, 95.0, 100.0],
+        "period_end": "2026Q3",
+    }
+
+    november, august = forecast_service.forecast_months(
+        model, _flat_food_history(), ["food"], ["2026-11", "2027-08"], as_of=date(2026, 10, 21)
     )
 
-    amounts = {point.category: point.amount for point in points}
-    assert amounts == {"food": food, "education": education}
-    assert all("2025-11" in point.explanation or target_month != "2026-11" for point in points)
+    # Typical month 1,000 over a year averaging 102.75: 1,000 * 116 / 102.75 and 1,000 * 100 / 102.75.
+    assert (november.amount, august.amount) == (1_129.0, 973.0)
+    assert november.hfce_multiplier / august.hfce_multiplier == pytest.approx(1.16, abs=1e-4)
+    assert november.seasonal_amount == august.seasonal_amount == 0.0
 
 
-def test_forecast_with_a_full_year_gives_each_month_of_a_quarter_its_own_amount():
+def test_forecast_with_a_full_year_keeps_tuition_in_the_month_it_was_paid():
+    model = _food_model()  # endog = Q4'25 100, Q1'26 110, Q2'26 90, Q3'26 100; forecasts 120
+    model.model["education"] = dict(model.model["food"])
+    history = [
+        *_flat_food_history(),
+        {**_food_expense("2026-06-10", 30_000.0), "category": "education"},
+    ]
+
+    june, november = (
+        forecast_service.forecast(
+            model, history, ["education"], as_of=date(2026, 10, 21), target_month=month
+        )[0]
+        for month in ["2027-06", "2026-11"]
+    )
+
+    # No typical tuition month; June 2026's PHP 30,000 recurs, grown by Q2'27 120 / Q2'26 90.
+    assert june.user_baseline_amount == 0.0
+    assert june.seasonal_amount == 40_000.0
+    assert june.amount == 40_000.0
+    assert "2026-06 seasonal spending" in june.explanation
+    assert november.amount == 0.0
+
+
+def test_forecast_with_a_full_year_brings_back_yearly_payments_in_their_month():
+    model = _food_model()  # endog = Q4'25 100, Q1'26 110, Q2'26 90, Q3'26 100; forecasts 120
+    model.model["education"] = dict(model.model["food"])
+    # Tuition every month from January to June is too regular to be a spike, so only the yearly mark keeps it seasonal.
+    tuition = [
+        {
+            **_food_expense(f"2026-0{month}-10", 14_000.0),
+            "category": "education",
+            "recurrence": "yearly",
+        }
+        for month in range(1, 7)
+    ]
+    supplies = [{**row, "category": "education", "amount": 500.0} for row in _flat_food_history()]
+
+    january, november = (
+        forecast_service.forecast(
+            model,
+            [*_flat_food_history(), *supplies, *tuition],
+            ["education"],
+            as_of=date(2026, 10, 21),
+            target_month=month,
+        )[0]
+        for month in ["2027-01", "2026-11"]
+    )
+
+    # Supplies PHP 500 * 120 / 100, plus January 2026's tuition grown by Q1'27 120 / Q1'26 110.
+    assert january.user_baseline_amount == 500.0
+    assert january.seasonal_amount == 15_272.73
+    assert january.amount == 15_873.0
+    assert "2026-01 seasonal spending" in january.explanation
+    assert (november.amount, november.seasonal_amount) == (600.0, 0.0)
+
+
+def test_forecast_with_a_full_year_still_forecasts_a_month_skipped_last_year():
+    history = [row for row in _flat_food_history() if not row["date"].startswith("2026-01")]
+
+    point = forecast_service.forecast(
+        _food_model(), history, ["food"], as_of=date(2026, 10, 21), target_month="2027-01"
+    )[0]
+
+    # Eleven PHP 1,000 months and an empty January average PHP 916.67, scaled by 120 / 100.
+    assert point.user_baseline_amount == 916.67
+    assert point.amount == 1_100.0
+    assert point.seasonal_amount == 0.0
+
+
+def test_forecast_with_a_full_year_adds_seasonal_spending_only_to_its_month():
     model = _food_model()  # Q4'25 HFCE 100, forecast Q4'26 120: multiplier 1.2 for every Q4 month
     history = [
         *_seasonal_history(),
@@ -280,21 +352,24 @@ def test_forecast_with_a_full_year_gives_each_month_of_a_quarter_its_own_amount(
         ("2026-11", 1_200.0),
         ("2026-12", 3_600.0),
     ]
+    assert [point.seasonal_amount for point in points] == [0.0, 2_400.0]
+    assert {point.user_baseline_amount for point in points} == {1_000.0}
     assert {point.hfce_multiplier for point in points} == {1.2}
     assert {point.baseline_method for point in points} == {"same_period_last_year"}
 
 
-def test_forecast_uses_last_years_completed_quarter_months_until_its_month_completes():
+def test_forecast_adds_no_seasonal_spending_until_last_years_month_completes():
     history = [*_seasonal_history(), _food_expense("2026-10-10", 1_500.0)]
 
-    # November 2026 is still in progress, so November 2027 follows the completed 2026Q4 months.
+    # November 2026 is still in progress, so November 2027 has only the typical month.
     point = forecast_service.forecast(
         _food_model(), history, ["food"], as_of=date(2026, 11, 21), target_month="2027-11"
     )[0]
 
     assert point.baseline_method == "same_period_last_year"
-    assert point.user_baseline_amount == 1_500.0  # October 2026, the only completed 2026Q4 month
-    assert "2026-10 spending" in point.explanation
+    assert point.user_baseline_amount == 1_000.0  # October 2026's PHP 1,500 is a spike month
+    assert point.seasonal_amount == 0.0
+    assert point.explanation.endswith("HFCE 2027Q4 trend.")
 
 
 def test_predict_forecasts_several_target_months_in_one_call(client):
@@ -398,7 +473,9 @@ def test_forecast_with_a_full_year_keeps_a_yearly_category_current():
         for month in ["2026-12", "2027-04"]
     )
 
-    assert december.user_baseline_amount == 6_000.0  # December 2025
+    # December 2025's PHP 6,000 is seasonal, grown by Q4'26 120 / Q4'25 100.
+    assert december.user_baseline_amount == 0.0
+    assert december.amount == 7_200.0
     assert april.amount == 0.0
 
 

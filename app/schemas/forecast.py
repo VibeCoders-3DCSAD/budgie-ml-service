@@ -39,6 +39,8 @@ class ForecastPoint(BaseModel):
     amount: float
     user_baseline_amount: float
     hfce_multiplier: float
+    # Last year's spending above the typical month, grown by HFCE; amount = baseline * multiplier + this.
+    seasonal_amount: float = 0.0
     hfce_forecast_amount_million_php: float
     explanation: str
     # same_period_last_year (12+ months), median_monthly (6-11 months), or recency_weighted_provisional (<6 months).
