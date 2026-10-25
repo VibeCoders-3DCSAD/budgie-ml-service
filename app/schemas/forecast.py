@@ -6,6 +6,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.core.config import MAX_FORECAST_MONTHS
 from app.schemas.common import ApiMetadata, ModuleStatus, Transaction
 
 MONTH_PATTERN = r"^\d{4}-(0[1-9]|1[0-2])$"
@@ -17,9 +18,9 @@ class ForecastRequest(BaseModel):
     categories: list[str] = Field(min_length=1, max_length=12)
     # Month to forecast (YYYY-MM); defaults to the next calendar month.
     target_month: str | None = Field(default=None, pattern=MONTH_PATTERN)
-    # Several months in one call, e.g. a year of monthly forecasts; the snapshot covers the first.
+    # Several months in one call: the current month plus up to a year ahead; the snapshot covers the first.
     target_months: list[Annotated[str, Field(pattern=MONTH_PATTERN)]] | None = Field(
-        default=None, min_length=1, max_length=12
+        default=None, min_length=1, max_length=MAX_FORECAST_MONTHS + 1
     )
 
     @model_validator(mode="after")

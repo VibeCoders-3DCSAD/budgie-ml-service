@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -49,6 +49,17 @@ def test_forecast_rounds_final_amounts_half_up_to_whole_pesos():
     assert [
         forecast_service._round_to_whole_peso(amount) for amount in [1.2, 1.4, 1.5, 1.7, 4_460.57]
     ] == [1.0, 1.0, 2.0, 2.0, 4_461.0]
+
+
+def test_today_follows_the_philippine_calendar(monkeypatch):
+    class _OneAmNovemberFirstInManila(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 31, 17, 0, tzinfo=UTC).astimezone(tz)
+
+    monkeypatch.setattr(forecast_service, "datetime", _OneAmNovemberFirstInManila)
+
+    assert forecast_service.manila_today() == date(2026, 11, 1)
 
 
 def test_seasonal_naive_hfce_artifact_forecasts_recursively():
@@ -249,23 +260,33 @@ def _flat_food_history() -> list[dict]:
     return [row for row in _seasonal_history() if row["category"] == "food"]
 
 
-def test_forecast_with_a_full_year_follows_hfce_quarterly_seasonality_for_a_flat_spender():
+def test_forecast_with_a_full_year_walks_each_month_forward_by_hfce():
     model = _food_model()
-    # Q4'25 116, Q1'26 100, Q2'26 95, Q3'26 100: Q4 runs 16% above Q3.
+    # Q4'25 116, Q1'26 100, Q2'26 95, Q3'26 100, repeating: Q4 runs 16% above Q3, Q1 back down to 100.
     model.model["food"] = {
         "family": "seasonal_naive",
         "model": [116.0, 100.0, 95.0, 100.0],
         "period_end": "2026Q3",
     }
+    months = ["2026-10", "2026-11", "2026-12", "2027-01", "2027-02", "2027-03"]
 
-    november, august = forecast_service.forecast_months(
-        model, _flat_food_history(), ["food"], ["2026-11", "2027-08"], as_of=date(2026, 10, 21)
+    points = forecast_service.forecast_months(
+        model, _flat_food_history(), ["food"], months, as_of=date(2026, 10, 21)
     )
 
-    # Typical month 1,000 over a year averaging 102.75: 1,000 * 116 / 102.75 and 1,000 * 100 / 102.75.
-    assert (november.amount, august.amount) == (1_129.0, 973.0)
-    assert november.hfce_multiplier / august.hfce_multiplier == pytest.approx(1.16, abs=1e-4)
-    assert november.seasonal_amount == august.seasonal_amount == 0.0
+    # September's PHP 1,000 steps by 1.16^(1/3) each Q4 month and (100/116)^(1/3) each Q1 month.
+    assert [point.amount for point in points] == [
+        1_051.0,
+        1_104.0,
+        1_160.0,
+        1_104.0,
+        1_051.0,
+        1_000.0,
+    ]
+    assert points[2].hfce_multiplier == pytest.approx(1.16)
+    assert {point.user_baseline_amount for point in points} == {1_000.0}
+    assert {point.seasonal_amount for point in points} == {0.0}
+    assert "from your 2026-09 spending, grown month by month with HFCE" in points[0].explanation
 
 
 def test_forecast_with_a_full_year_keeps_tuition_in_the_month_it_was_paid():
@@ -316,12 +337,13 @@ def test_forecast_with_a_full_year_brings_back_yearly_payments_in_their_month():
         for month in ["2027-01", "2026-11"]
     )
 
-    # Supplies PHP 500 * 120 / 100, plus January 2026's tuition grown by Q1'27 120 / Q1'26 110.
+    # September's PHP 500 of supplies walked through Q4's 1.2 growth, plus January 2026's tuition
+    # grown by Q1'27 120 / Q1'26 110. November is two of Q4's three steps: 500 * 1.2^(2/3).
     assert january.user_baseline_amount == 500.0
     assert january.seasonal_amount == 15_272.73
     assert january.amount == 15_873.0
     assert "2026-01 seasonal spending" in january.explanation
-    assert (november.amount, november.seasonal_amount) == (600.0, 0.0)
+    assert (november.amount, november.seasonal_amount) == (565.0, 0.0)
 
 
 def test_forecast_with_a_full_year_still_forecasts_a_month_skipped_last_year():
@@ -331,14 +353,27 @@ def test_forecast_with_a_full_year_still_forecasts_a_month_skipped_last_year():
         _food_model(), history, ["food"], as_of=date(2026, 10, 21), target_month="2027-01"
     )[0]
 
-    # Eleven PHP 1,000 months and an empty January average PHP 916.67, scaled by 120 / 100.
-    assert point.user_baseline_amount == 916.67
-    assert point.amount == 1_100.0
+    # The empty January 2026 does not recur: September's PHP 1,000 walks through Q4's 1.2 growth.
+    assert point.user_baseline_amount == 1_000.0
+    assert point.amount == 1_200.0
     assert point.seasonal_amount == 0.0
 
 
+def test_forecast_with_a_full_year_starts_from_the_typical_month_after_an_empty_last_month():
+    history = [row for row in _flat_food_history() if not row["date"].startswith("2026-09")]
+
+    point = forecast_service.forecast(
+        _food_model(), history, ["food"], as_of=date(2026, 10, 21), target_month="2026-12"
+    )[0]
+
+    # September is empty, so eleven PHP 1,000 months and that zero average PHP 916.67 to walk from.
+    assert point.user_baseline_amount == 916.67
+    assert point.amount == 1_100.0
+    assert "from your typical month" in point.explanation
+
+
 def test_forecast_with_a_full_year_adds_seasonal_spending_only_to_its_month():
-    model = _food_model()  # Q4'25 HFCE 100, forecast Q4'26 120: multiplier 1.2 for every Q4 month
+    model = _food_model()  # Q3'26 HFCE 100, forecast Q4'26 120: each Q4 month steps by 1.2^(1/3)
     history = [
         *_seasonal_history(),
         _food_expense("2025-12-20", 2_000.0),  # Christmas: December 2025 totals PHP 3,000
@@ -348,28 +383,32 @@ def test_forecast_with_a_full_year_adds_seasonal_spending_only_to_its_month():
         model, history, ["food"], ["2026-11", "2026-12"], as_of=date(2026, 10, 21)
     )
 
+    # November and December differ by HFCE's monthly step; only December adds Christmas, 2,000 * 1.2.
     assert [(point.month, point.amount) for point in points] == [
-        ("2026-11", 1_200.0),
+        ("2026-11", 1_129.0),
         ("2026-12", 3_600.0),
     ]
     assert [point.seasonal_amount for point in points] == [0.0, 2_400.0]
     assert {point.user_baseline_amount for point in points} == {1_000.0}
-    assert {point.hfce_multiplier for point in points} == {1.2}
+    assert [point.hfce_multiplier for point in points] == [1.129243, 1.2]
     assert {point.baseline_method for point in points} == {"same_period_last_year"}
 
 
 def test_forecast_adds_no_seasonal_spending_until_last_years_month_completes():
     history = [*_seasonal_history(), _food_expense("2026-10-10", 1_500.0)]
 
-    # November 2026 is still in progress, so November 2027 has only the typical month.
+    # November 2026 is still in progress, so November 2027 has no seasonal amount.
     point = forecast_service.forecast(
         _food_model(), history, ["food"], as_of=date(2026, 11, 21), target_month="2027-11"
     )[0]
 
+    # October 2026's PHP 1,500 is a spike month, so the walk starts from the typical PHP 1,000:
+    # two Q4'26 steps of 1.2^(1/3), then flat HFCE through 2027.
     assert point.baseline_method == "same_period_last_year"
-    assert point.user_baseline_amount == 1_000.0  # October 2026's PHP 1,500 is a spike month
+    assert point.user_baseline_amount == 1_000.0
+    assert point.amount == 1_129.0
     assert point.seasonal_amount == 0.0
-    assert point.explanation.endswith("HFCE 2027Q4 trend.")
+    assert point.explanation.endswith("from your typical month, grown month by month with HFCE.")
 
 
 def test_predict_forecasts_several_target_months_in_one_call(client):
@@ -394,6 +433,26 @@ def test_predict_forecasts_several_target_months_in_one_call(client):
     assert [point["month"] for point in body["forecasts"]] == payload["target_months"]
     assert body["snapshot"]["month"] == payload["target_months"][0]
     assert body["snapshot"]["total_amount"] == body["forecasts"][0]["amount"]
+
+
+def test_predict_accepts_the_current_month_plus_a_year_ahead(client):
+    months = [_tenth_of_month_before(-offset)[:7] for offset in range(13)]
+    payload = {
+        "user_id": "test-user-hfce",
+        "categories": ["food"],
+        "historical_transactions": [_food_expense(_tenth_of_month_before(1), 1_300.0)],
+        "target_months": months,
+    }
+
+    response = trusted_post(client, "/api/v1/forecast/predict", payload, "test-user-hfce")
+
+    assert response.status_code == 200
+    assert [point["month"] for point in response.json()["forecasts"]] == months
+    too_many = {**payload, "target_months": [*months, _tenth_of_month_before(-13)[:7]]}
+    assert (
+        trusted_post(client, "/api/v1/forecast/predict", too_many, "test-user-hfce").status_code
+        == 422
+    )
 
 
 def test_predict_rejects_both_target_month_kinds(client):
@@ -439,6 +498,24 @@ def test_forecast_median_counts_months_without_spending_as_zero():
 
     assert points[0].baseline_method == "median_monthly"
     assert points[0].user_baseline_amount == 7_000.0  # median of [14k, 14k, 14k, 0, 0, 0]
+
+
+def test_forecast_with_six_to_eleven_months_walks_the_median_month_forward_by_hfce():
+    # March to September 2026: seven PHP 1,000 food months.
+    history = [row for row in _flat_food_history() if row["date"] >= "2026-03-01"]
+
+    points = forecast_service.forecast_months(
+        _food_model(),
+        history,
+        ["food"],
+        ["2026-11", "2026-12", "2027-01"],
+        as_of=date(2026, 10, 21),
+    )
+
+    # Q3'26 100 to Q4'26 120 splits into three 1.2^(1/3) steps from September; Q1'27 stays at 120.
+    assert {point.baseline_method for point in points} == {"median_monthly"}
+    assert [point.amount for point in points] == [1_129.0, 1_200.0, 1_200.0]
+    assert "grown month by month with HFCE" in points[0].explanation
 
 
 @pytest.mark.parametrize(
