@@ -1,14 +1,15 @@
 name: Deploy
 
+# main deploys to the production box, staging to the staging box.
 on:
   workflow_run:
     workflows: [CI]
     types: [completed]
-    branches: [main]
+    branches: [main, staging]
   workflow_dispatch:
 
 concurrency:
-  group: deploy-ml
+  group: deploy-ml-${{ github.event.workflow_run.head_branch || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -16,6 +17,8 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # workflow_run jobs run on the default branch, so pick the environment from the branch that passed CI.
+    environment: ${{ (github.event.workflow_run.head_branch || github.ref_name) == 'main' && 'production' || 'staging' }}
     steps:
       - name: Configure SSH
         env:
@@ -31,14 +34,16 @@ jobs:
         env:
           HOST: ${{ secrets.LIGHTSAIL_HOST }}
           SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          BRANCH: ${{ github.event.workflow_run.head_branch || github.ref_name }}
         run: |
-          ssh -i ~/.ssh/lightsail -o IdentitiesOnly=yes "ubuntu@$HOST" "bash -s" -- "$SHA" <<'EOF'
+          ssh -i ~/.ssh/lightsail -o IdentitiesOnly=yes "ubuntu@$HOST" "bash -s" -- "$SHA" "$BRANCH" <<'EOF'
           set -euo pipefail
           sha="$1"
+          branch="$2"
           repo=/srv/budgie/budgie-ml-service
 
           echo "==> Pull"
-          sudo -u budgie git -C "$repo" fetch --prune origin main
+          sudo -u budgie git -C "$repo" fetch --prune origin "$branch"
           sudo -u budgie git -C "$repo" merge --ff-only "$sha"
 
           echo "==> Sync dependencies"
